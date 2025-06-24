@@ -125,8 +125,7 @@ def handle_message(event):
                 "いつでもサポートしています。\n\n"
                 "🔮鑑定＆カード購入は\n"
                 "LINEメニュー【SHOP】からご確認ください🐈‍⬛"
-            )
-
+            ) 
         log_usage(user_id, user_input)
         line_bot_api.reply_message(
             event.reply_token,

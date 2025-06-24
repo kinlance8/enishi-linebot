@@ -5,46 +5,55 @@ import os
 import random
 import json
 from datetime import datetime
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 app = Flask(__name__)
 line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
 
-# ファイルにユーザー使用記録を保存
 DATA_FILE = "user_access_log.json"
 
-# 占いの使用履歴を読み込み
 def load_user_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r") as f:
             return json.load(f)
     return {}
 
-# 占い使用履歴を保存
 def save_user_data(data):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f)
 
-# 月1回制限をチェック
 def is_user_allowed(user_id):
     data = load_user_data()
     now = datetime.now()
     month_key = now.strftime("%Y-%m")
-
     if user_id in data and data[user_id] == month_key:
         return False
     data[user_id] = month_key
     save_user_data(data)
     return True
 
-# 使用ログの記録
-LOG_FILE = "usage_log.txt"
-def log_usage(user_id, message):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(LOG_FILE, "a") as f:
-        f.write(f"{now},{user_id},{message}\n")
+def log_to_sheets(user_id, message):
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds_dict = {
+        "type": os.getenv("GOOGLE_TYPE"),
+        "project_id": os.getenv("GOOGLE_PROJECT_ID"),
+        "private_key_id": os.getenv("GOOGLE_PRIVATE_KEY_ID"),
+        "private_key": os.getenv("GOOGLE_PRIVATE_KEY").replace("\\n", "\n"),
+        "client_email": os.getenv("GOOGLE_CLIENT_EMAIL"),
+        "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+        "auth_uri": os.getenv("GOOGLE_AUTH_URI"),
+        "token_uri": os.getenv("GOOGLE_TOKEN_URI"),
+        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{os.getenv('GOOGLE_CLIENT_EMAIL')}"
+    }
+    credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    gc = gspread.authorize(credentials)
+    sheet = gc.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sheet.append_row([user_id, timestamp, message])
 
-# あなたが指定した30個のアドバイスリスト
 advice_list = [
     "あなたの気持ち、ちゃんと届こうとしていますよ。焦らず、自分を信じてあげてくださいね。",
     "この道に“正解”なんてなくていいんです。あなたのペースが、いちばん大切です。",
@@ -82,13 +91,11 @@ advice_list = [
 def callback():
     signature = request.headers["X-Line-Signature"]
     body = request.get_data(as_text=True)
-
     try:
         handler.handle(body, signature)
     except Exception as e:
         print(f"Error: {e}")
         return "NG", 400
-
     return "OK", 200
 
 @handler.add(MessageEvent, message=TextMessage)
@@ -119,15 +126,10 @@ def handle_message(event):
                 "今月はもうご利用済みのようですね💌\n"
                 "でも、落ち込まないでください。\n\n"
                 "お願いを叶える【縁カード】は、\n"
-                "“幸運招来エネルギー”\n"
-                "込めた特別な1枚🐾✨\n\n"
-                "あなたの願いが動き出すタイミングを、\n"
-                "いつでもサポートしています。\n\n"
-                "🔮鑑定＆カード購入は\n"
-                "LINEメニュー【SHOP】からご確認ください🐈‍⬛"
-            ) 
-        log_usage(user_id, user_input)
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=message)
-        )
+                "“幸運招来エネルギー”を込めた特別な1枚🐾✨\n\n"
+                "あなたの願いが動き出すタイミングを、いつでもサポートしています。\n\n"
+                "🔮鑑定＆カード購入はLINEメニュー【SHOP】からご確認ください🐈‍⬛"
+            )
+
+        log_to_sheets(user_id, user_input)
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=message))

@@ -3,57 +3,47 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import os
 import random
-import json
-from datetime import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
 
 app = Flask(__name__)
 line_bot_api = LineBotApi(os.getenv("LINE_CHANNEL_ACCESS_TOKEN"))
 handler = WebhookHandler(os.getenv("LINE_CHANNEL_SECRET"))
 
-DATA_FILE = "user_access_log.json"
-
-def load_user_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_user_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f)
-
-def is_user_allowed(user_id):
-    data = load_user_data()
-    now = datetime.now()
-    month_key = now.strftime("%Y-%m")
-    if user_id in data and data[user_id] == month_key:
-        return False
-    data[user_id] = month_key
-    save_user_data(data)
-    return True
-
-def log_to_sheets(user_id, message):
+# Googleスプレッドシート連携の設定
+def get_gspread_client():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds_dict = {
+    credentials = ServiceAccountCredentials.from_json_keyfile_dict({
         "type": os.getenv("GOOGLE_TYPE"),
         "project_id": os.getenv("GOOGLE_PROJECT_ID"),
         "private_key_id": os.getenv("GOOGLE_PRIVATE_KEY_ID"),
-        "private_key": os.getenv("GOOGLE_PRIVATE_KEY").replace("\\n", "\n"),
+        "private_key": os.getenv("GOOGLE_PRIVATE_KEY").replace('\\n', '\n'),
         "client_email": os.getenv("GOOGLE_CLIENT_EMAIL"),
         "client_id": os.getenv("GOOGLE_CLIENT_ID"),
-        "auth_uri": os.getenv("GOOGLE_AUTH_URI"),
-        "token_uri": os.getenv("GOOGLE_TOKEN_URI"),
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
         "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-        "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{os.getenv('GOOGLE_CLIENT_EMAIL')}"
-    }
-    credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    gc = gspread.authorize(credentials)
-    sheet = gc.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    sheet.append_row([user_id, timestamp, message])
+        "client_x509_cert_url": os.getenv("GOOGLE_CLIENT_X509_CERT_URL")
+    }, scope)
+    return gspread.authorize(credentials)
 
+# 使用履歴をGoogle Sheetsで管理（月1制限）
+def is_user_allowed(user_id):
+    client = get_gspread_client()
+    sheet = client.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
+    records = sheet.get_all_records()
+
+    current_month = datetime.now().strftime("%Y-%m")
+
+    for record in records:
+        if record['user_id'] == user_id and record['month'] == current_month:
+            return False
+
+    sheet.append_row([user_id, current_month])
+    return True
+
+# 占いメッセージ
 advice_list = [
     "あなたの気持ち、ちゃんと届こうとしていますよ。焦らず、自分を信じてあげてくださいね。",
     "この道に“正解”なんてなくていいんです。あなたのペースが、いちばん大切です。",
@@ -87,49 +77,26 @@ advice_list = [
     "どんな未来でも、あなたには“選び直す力”がちゃんとあるんです。"
 ]
 
-@app.route("/callback", methods=["POST"])
-def callback():
-    signature = request.headers["X-Line-Signature"]
-    body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, signature)
-    except Exception as e:
-        print(f"Error: {e}")
-        return "NG", 400
-    return "OK", 200
-
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_input = event.message.text.strip()
     user_id = event.source.user_id
 
-    if "縁カードで占って" in user_input:
+    if user_input == "縁カードで占って":
         if is_user_allowed(user_id):
             advice = random.choice(advice_list)
-            message = (
-                "🪄✨今月のあなたに贈る、ひとことメッセージ🐈‍⬛\n\n"
-                f"{advice}\n\n"
-                "ふと心に響いたら、それは“運命のサイン”かもしれません。\n\n"
-                "🌙この言葉の意味がもっと知りたいあなたへ。\n\n"
-                "今のあなたに必要な\n"
-                "“縁のメッセージ”を、\n"
-                "鑑定で丁寧にお届けします。\n\n"
-                "💫願いをそっと後押しする\n"
-                "【縁カード】（幸運招来エネルギー封入ver.）も\n"
-                "数量限定でご用意しています🐾✨\n\n"
-                "▶︎ LINEメニューの【SHOP】からご覧ください🔮"
-            )
+            reply = f"🪄✨今月のあなたに贈る、ひとことメッセージ🐈‍⬛\n\n{advice}\n\nふと心に響いたら、それは“運命のサイン”かもしれません。\n\n🌙この言葉の意味がもっと知りたいあなたへ。\n\n今のあなたに必要な“縁のメッセージ”を、鑑定で丁寧にお届けします。\n\n💫願いをそっと後押しする【縁カード】（幸運招来エネルギー封入ver.）も数量限定でご用意しています🐾✨\n\n▶︎ LINEメニューの【SHOP】からご覧ください🔮"
         else:
-            message = (
-                "🔒 月1回限定・縁カードメッセージ【占い使用済み時の返信】\n\n"
-                "⚠️この占いは【月に一度だけ】の特別なメッセージです🌙\n\n"
-                "今月はもうご利用済みのようですね💌\n"
-                "でも、落ち込まないでください。\n\n"
-                "お願いを叶える【縁カード】は、\n"
-                "“幸運招来エネルギー”を込めた特別な1枚🐾✨\n\n"
-                "あなたの願いが動き出すタイミングを、いつでもサポートしています。\n\n"
-                "🔮鑑定＆カード購入はLINEメニュー【SHOP】からご確認ください🐈‍⬛"
-            )
+            reply = "⚠️この占いは【月に一度だけ】の特別なメッセージです🌙\n\n今月はもうご利用済みのようですね💌でも、落ち込まないでください。\n\nお願いを叶える【縁カード】は、“幸運招来エネルギー”込めた特別な1枚🐾✨\n\nあなたの願いが動き出すタイミングを、いつでもサポートしています。\n\n🔮鑑定＆カード購入はLINEメニュー【SHOP】からご確認ください🐈‍⬛"
 
-        log_to_sheets(user_id, user_input)
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=message))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
+@app.route("/callback", methods=["POST"])
+def callback():
+    signature = request.headers["X-Line-Signature"]
+    body = request.get_data(as_text=True)
+    handler.handle(body, signature)
+    return "OK", 200
+
+if __name__ == "__main__":
+    app.run()
